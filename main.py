@@ -1,21 +1,22 @@
+import concurrent.futures
+import configparser
+import json
+import logging
+import queue
+import re
+import threading
+import tkinter as tk
+import tkinter.font as font
+from datetime import datetime
+from logging.handlers import QueueHandler
+from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog
+from urllib.parse import urljoin, quote, unquote, urlparse
+
+import pandas as pd
 import requests
 import ttkbootstrap as ttk
-import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
-import tkinter.font as font
 from bs4 import BeautifulSoup
-import pandas as pd
-from urllib.parse import urljoin, quote, unquote, urlparse
-import json
-from pathlib import Path
-import threading
-import concurrent.futures
-import logging
-from logging.handlers import QueueHandler
-import queue
-import configparser
-from datetime import datetime
-import re
 
 CONFIG_FILE = 'config.ini'
 CONFIG = {
@@ -88,6 +89,7 @@ def validate_folder(folder_path):
 
 
 def download_file(file_url: str, save_path: Path, log_func: callable, cancel_event: threading.Event) -> Path | None:
+    global filename
     try:
         filename = Path(file_url).name
         encoded_url = quote(file_url, safe='/:')
@@ -239,39 +241,48 @@ def search_teachers_in_csv(csv_files, teacher_list, log_func, progress_callback=
             log_func("[Отменено] Поиск в CSV")
             break
         try:
-            df = pd.read_csv(csv_file)
+            df = pd.read_csv(csv_file, encoding='utf-8')
             log_func(f"Заголовки столбцов в {csv_file}: {list(df.columns)}")
+            filename = Path(csv_file).stem
+            parts = filename.rsplit('_', 1)
+            group_name = parts[-1] if len(parts) > 1 else filename
+            if not re.match(r'[А-Яа-я]+-\d+[а-я]?', group_name):
+                log_func(f"[Предупреждение] Неверный формат имени группы: {group_name} в файле {filename}")
+            log_func(f"Извлечено имя группы: {group_name} из файла {filename}")
             for _, row in df.iterrows():
                 if cancel_event and cancel_event.is_set():
                     log_func("[Отменено] Поиск в CSV")
                     break
                 row_dict = row.to_dict()
-                for col, value in row_dict.items():
+                teacher_cols = ['Unnamed: 6', 'Unnamed: 9']
+                matching_teachers = []
+                for col in teacher_cols:
+                    value = row_dict.get(col)
                     if isinstance(value, str) and teacher_pattern.search(value):
-                        matching_teachers = [t for t in teacher_list if t.lower() in value.lower()]
-                        if matching_teachers:
-                            even_week = {
-                                'День': row_dict.get('Unnamed: 1', ''),
-                                'Время': row_dict.get('Unnamed: 3', ''),
-                                'Аудитория': row_dict.get('Unnamed: 4', ''),
-                                'Тип': row_dict.get('Unnamed: 5', ''),
-                                'Преподаватель': row_dict.get('Unnamed: 6', ''),
-                                'Предмет': row_dict.get('Unnamed: 7', '')
-                            }
-                            odd_week = {
-                                'День': row_dict.get('Unnamed: 13', row_dict.get('Unnamed: 1', '')),
-                                'Время': row_dict.get('Unnamed: 12', ''),
-                                'Аудитория': row_dict.get('Unnamed: 11', ''),
-                                'Тип': row_dict.get('Unnamed: 10', ''),
-                                'Преподаватель': row_dict.get('Unnamed: 9', ''),
-                                'Предмет': row_dict.get('Unnamed: 8', '')
-                            }
-                            results.append({
-                                'Преподаватель': matching_teachers[0],
-                                'Группа': Path(csv_file).stem.split('_')[0],
-                                'Четная неделя': even_week,
-                                'Нечетная неделя': odd_week
-                            })
+                        matching_teachers.extend([t for t in teacher_list if t.lower() in value.lower()])
+                if matching_teachers:
+                    even_week = {
+                        'День': row_dict.get('Unnamed: 1', ''),
+                        'Время': row_dict.get('Unnamed: 12', ''),
+                        'Аудитория': row_dict.get('Unnamed: 11', ''),
+                        'Тип': row_dict.get('Unnamed: 10', ''),
+                        'Преподаватель': row_dict.get('Unnamed: 9', ''),
+                        'Предмет': row_dict.get('Unnamed: 8', '')
+                    }
+                    odd_week = {
+                        'День': row_dict.get('Unnamed: 1', ''),
+                        'Время': row_dict.get('Unnamed: 3', ''),
+                        'Аудитория': row_dict.get('Unnamed: 4', ''),
+                        'Тип': row_dict.get('Unnamed: 5', ''),
+                        'Преподаватель': row_dict.get('Unnamed: 6', ''),
+                        'Предмет': row_dict.get('Unnamed: 7', '')
+                    }
+                    results.append({
+                        'Преподаватель': matching_teachers[0],
+                        'Группа': group_name,
+                        'Четная неделя': even_week,
+                        'Нечетная неделя': odd_week
+                    })
         except Exception as e:
             log_func(f"[Ошибка CSV] {csv_file}: {e}")
         if progress_callback:
@@ -387,7 +398,7 @@ class ScheduleApp:
                                                                                        padx=5, pady=5)
         path_entry = ttk.Entry(folder_frame, textvariable=self.folder_path, width=40, font=('Arial', 10))
         path_entry.grid(row=0, column=1, sticky='ew', padx=5, pady=5)
-        browse_btn = ttk.Button(folder_frame, text="Обзор", command=self.select_folder, bootstyle="secondary")
+        browse_btn = ttk.Button(folder_frame, text="Обзор", command=self.select_folder, bootstyle="secondary", width=10)
         browse_btn.grid(row=0, column=2, sticky='e', padx=5, pady=5)
         folder_frame.grid_columnconfigure(1, weight=1)
 
@@ -403,9 +414,10 @@ class ScheduleApp:
         self.listbox.grid(row=1, column=0, columnspan=2, sticky='nsew', padx=5, pady=5)
         for t in self.teachers:
             self.listbox.insert(tk.END, t)
-        add_btn = ttk.Button(teacher_frame, text="Добавить", command=self.add_teacher, bootstyle="primary")
+        add_btn = ttk.Button(teacher_frame, text="Добавить", command=self.add_teacher, bootstyle="primary", width=10)
         add_btn.grid(row=1, column=2, sticky='ew', padx=5, pady=5)
-        delete_btn = ttk.Button(teacher_frame, text="Удалить", command=self.delete_teacher, bootstyle="danger")
+        delete_btn = ttk.Button(teacher_frame, text="Удалить", command=self.delete_teacher, bootstyle="danger",
+                                width=10)
         delete_btn.grid(row=2, column=2, sticky='ew', padx=5, pady=5)
         teacher_frame.grid_columnconfigure(0, weight=1)
         teacher_frame.grid_columnconfigure(1, weight=1)
@@ -413,20 +425,25 @@ class ScheduleApp:
 
         action_frame = ttk.Frame(main_frame)
         action_frame.grid(row=3, column=0, columnspan=3, sticky='ew', padx=10, pady=10)
-        self.download_btn = ttk.Button(action_frame, text="⬇ Скачать расписания", command=self.start_download_thread,
-                                       bootstyle="success")
+        self.download_btn = ttk.Button(action_frame, text="⬇ Скачать", command=self.start_download_thread,
+                                       bootstyle="success", width=15)
         self.download_btn.grid(row=0, column=0, sticky='ew', padx=5, pady=5)
-        self.search_btn = ttk.Button(action_frame, text="🔍 Найти преподавателей", command=self.start_search_thread,
-                                     bootstyle="info")
-        self.search_btn.grid(row=1, column=0, sticky='ew', padx=5, pady=5)
+        self.search_btn = ttk.Button(action_frame, text="🔍 Найти", command=self.start_search_thread,
+                                     bootstyle="info", width=15)
+        self.search_btn.grid(row=0, column=1, sticky='ew', padx=5, pady=5)
         self.cancel_btn = ttk.Button(action_frame, text="⏹ Отмена", command=self.cancel_operation, state='disabled',
-                                     bootstyle="warning")
-        self.cancel_btn.grid(row=2, column=0, sticky='ew', padx=5, pady=5)
-        results_btn = ttk.Button(action_frame, text="📋 Показать результаты", command=self.show_results,
-                                 bootstyle="light")
-        results_btn.grid(row=3, column=0, sticky='ew', padx=5, pady=5)
-        log_btn = ttk.Button(action_frame, text="🪵 Открыть окно логов", command=self.show_logs, bootstyle="dark")
-        log_btn.grid(row=4, column=0, sticky='ew', padx=5, pady=5)
+                                     bootstyle="warning", width=15)
+        self.cancel_btn.grid(row=0, column=2, sticky='ew', padx=5, pady=5)
+        results_btn = ttk.Button(action_frame, text="📋 Результаты", command=self.show_results,
+                                 bootstyle="light", width=15)
+        results_btn.grid(row=0, column=3, sticky='ew', padx=5, pady=5)
+        log_btn = ttk.Button(action_frame, text="🪵 Логи", command=self.show_logs, bootstyle="dark", width=15)
+        log_btn.grid(row=0, column=4, sticky='ew', padx=5, pady=5)
+        action_frame.grid_columnconfigure(0, weight=1)
+        action_frame.grid_columnconfigure(1, weight=1)
+        action_frame.grid_columnconfigure(2, weight=1)
+        action_frame.grid_columnconfigure(3, weight=1)
+        action_frame.grid_columnconfigure(4, weight=1)
 
         self.progress_bar = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100, bootstyle="striped")
         self.progress_bar.grid(row=4, column=0, columnspan=3, sticky='ew', padx=10, pady=10)
@@ -518,24 +535,11 @@ class ScheduleApp:
             return
         self.results_win = tk.Toplevel(self.root)
         self.results_win.title("Результаты поиска")
-        self.tree = ttk.Treeview(self.results_win,
-                                 columns=("Преп.", "Гр.", "День (Ч)", "Вр. (Ч)", "Ауд. (Ч)", "Тип (Ч)", "Предм. (Ч)",
-                                          "День (Н)", "Вр. (Н)", "Ауд. (Н)", "Тип (Н)", "Предм. (Н)"),
-                                 show="headings")
-        self.tree.heading("Преп.", text="Преп.")
-        self.tree.heading("Гр.", text="Гр.")
-        self.tree.heading("День (Ч)", text="День (Ч)")
-        self.tree.heading("Вр. (Ч)", text="Вр. (Ч)")
-        self.tree.heading("Ауд. (Ч)", text="Ауд. (Ч)")
-        self.tree.heading("Тип (Ч)", text="Тип (Ч)")
-        self.tree.heading("Предм. (Ч)", text="Предм. (Ч)")
-        self.tree.heading("День (Н)", text="День (Н)")
-        self.tree.heading("Вр. (Н)", text="Вр. (Н)")
-        self.tree.heading("Ауд. (Н)", text="Ауд. (Н)")
-        self.tree.heading("Тип (Н)", text="Тип (Н)")
-        self.tree.heading("Предм. (Н)", text="Предм. (Н)")
-        for col in self.tree["columns"]:
-            self.tree.heading(col, command=lambda c=col: self.sort_treeview(c, False))
+        columns = ("Преп.", "Гр.", "День (Ч)", "Вр. (Ч)", "Ауд. (Ч)", "Тип (Ч)", "Предм. (Ч)",
+                   "День (Н)", "Вр. (Н)", "Ауд. (Н)", "Тип (Н)", "Предм. (Н)")
+        self.tree = ttk.Treeview(self.results_win, columns=columns, show="headings")
+        for col in columns:
+            self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
         vsb = ttk.Scrollbar(self.results_win, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(self.results_win, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -544,6 +548,7 @@ class ScheduleApp:
         hsb.grid(row=1, column=0, sticky="ew")
         self.results_win.grid_rowconfigure(0, weight=1)
         self.results_win.grid_columnconfigure(0, weight=1)
+
         for result in self.results:
             teacher = result['Преподаватель']
             group = result['Группа']
@@ -563,23 +568,21 @@ class ScheduleApp:
                 odd_week['Тип'],
                 odd_week['Предмет']
             ))
+
         style = ttk.Style()
         font_name = style.lookup("Treeview", "font")
         tree_font = font.nametofont(font_name)
-        columns = self.tree["columns"]
         for i, col in enumerate(columns):
-            max_width = 50
-            heading_text = self.tree.heading(col, "text")
-            heading_width = tree_font.measure(heading_text)
-            max_width = max(max_width, heading_width)
+            max_content_width = 50
             for item in self.tree.get_children():
                 values = self.tree.item(item, "values")
                 if i < len(values):
-                    text = str(values[i])
-                    text_width = tree_font.measure(text)
-                    max_width = max(max_width, text_width)
-            self.tree.column(col, width=max_width + 20, minwidth=50, stretch=False)
-        self.tree.tag_configure('wrapped', font=('Arial', 8))
+                    text = str(values[i]) if values[i] else ""
+                    text_width = tree_font.measure(text) + 20
+                    max_content_width = max(max_content_width, text_width)
+            final_width = min(max_content_width, 300)
+            self.tree.column(col, width=final_width, minwidth=50, stretch=False)
+        self.tree.tag_configure('wrapped', font=('Arial', 12))
 
     def process_log_queue(self):
         try:
@@ -621,7 +624,7 @@ class ScheduleApp:
                 messagebox.showwarning("Путь не выбран", "Выберите папку для сохранения.")
                 return
             if not validate_folder(self.folder_path.get()):
-                messagebox.showerror("Ошибка", "Папка недоступна или не имеет прав на запись.")
+                messagebox.showerror("Ошибка", "Папка недоступна или не имеет прав на записи.")
                 return
             log("⬇ Начинается загрузка...")
             files = download_excel_files(self.folder_path.get(), log, self.update_progress, self.cancel_event)
